@@ -3,10 +3,14 @@ EOL Inspector — a tiny WPF app to see LF vs CRLF across a folder
 
 WHAT IT DOES
 ------------
-Pick a folder, click Scan, and it lists every (text) file with its line-ending
-style: CRLF, LF, CR, Mixed, or None. It also shows the raw count of each
-terminator so a "Mixed" file tells you how mixed it is. Binary files (anything
-containing a NUL byte) are skipped automatically.
+Pick a folder, click Scan, and it lists every (text) file with its byte-order
+mark (BOM) and its line-ending style: CRLF, LF, CR, Mixed, or None. It also
+shows the raw count of each terminator so a "Mixed" file tells you how mixed it
+is. Binary files (anything containing a NUL byte) are skipped automatically.
+
+The columns are: File, BOM, EOL Style, CRLF, LF, CR, Size. The BOM column shows
+the detected mark ("UTF-8") or "None" when there isn't one; "None" is dimmed so
+the files that DO carry a BOM stand out.
 
 HOW TO OPEN IT IN VISUAL STUDIO 2022
 ------------------------------------
@@ -57,3 +61,17 @@ endings before we count them. We walk the bytes:
 A file using exactly one of these is labeled accordingly; more than one ->
 "Mixed"; none -> "None". This is exactly the distinction Visual Studio's
 editor won't show you inline.
+
+The BOM column comes from the first few bytes of the same raw read:
+  - EF BB BF        -> UTF-8
+  - FF FE           -> UTF-16 LE
+  - FE FF           -> UTF-16 BE
+  - FF FE 00 00     -> UTF-32 LE
+  - 00 00 FE FF     -> UTF-32 BE
+  - anything else   -> None
+Longer marks are checked before shorter ones, since UTF-16 LE (FF FE) is the
+start of UTF-32 LE (FF FE 00 00). In practice you'll only ever see "UTF-8" or
+"None" in the list: UTF-16/UTF-32 files are full of NUL bytes, so they trip the
+binary check and get skipped before they're shown. The wider encodings are
+still recognized so the value stays correct if that binary rule is relaxed.
+The BOM bytes contain no CR or LF, so they never affect the line-ending counts.
