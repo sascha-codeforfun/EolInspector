@@ -1,5 +1,7 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Input;
 
 namespace EolInspector
 {
@@ -73,6 +75,75 @@ namespace EolInspector
                 StatusText.Text = "Folder selected. Click Scan.";
             }
         }
+
+        // Double-clicking a row opens the Windows "Open with" picker for that
+        // file, so you choose the app every time instead of launching whatever
+        // is registered as the default. SHOpenWithDialog is the shell API behind
+        // the "How do you want to open this file?" dialog — far more reliable
+        // from .NET than the "openas" ShellExecute verb, which often fails here.
+        private void ResultsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (ResultsGrid.SelectedItem is not FileEolResult row)
+                return;
+
+            if (!File.Exists(row.FullPath))
+            {
+                StatusText.Text = "File no longer exists: " + row.RelativePath;
+                return;
+            }
+
+            var info = new OpenAsInfo
+            {
+                FilePath = row.FullPath,
+                FileClass = null,
+                // AllowRegistration keeps the "Always"/"Just once" choice;
+                // Exec actually launches the app the user picks.
+                Flags = OpenAsInfoFlags.AllowRegistration | OpenAsInfoFlags.Exec
+            };
+
+            // Parent the dialog to this window so it's owned and centred.
+            var owner = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+
+            try
+            {
+                int hr = SHOpenWithDialog(owner, ref info);
+
+                // S_OK (0) = app chosen and launched.
+                // ERROR_CANCELLED = user closed the dialog. Neither is an error.
+                const int ERROR_CANCELLED = unchecked((int)0x800704C7);
+                if (hr != 0 && hr != ERROR_CANCELLED)
+                    StatusText.Text = $"Couldn't show the Open With dialog (0x{hr:X8}).";
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = "Could not open: " + ex.Message;
+            }
+        }
+
+        // --- Win32 interop for the shell "Open With" dialog -----------------
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct OpenAsInfo
+        {
+            [MarshalAs(UnmanagedType.LPWStr)] public string FilePath;
+            [MarshalAs(UnmanagedType.LPWStr)] public string? FileClass;
+            [MarshalAs(UnmanagedType.I4)] public OpenAsInfoFlags Flags;
+        }
+
+        [Flags]
+        private enum OpenAsInfoFlags
+        {
+            AllowRegistration = 0x00000001, // OAIF_ALLOW_REGISTRATION
+            RegisterExt       = 0x00000002, // OAIF_REGISTER_EXT
+            Exec              = 0x00000004, // OAIF_EXEC
+            ForceRegistration = 0x00000008, // OAIF_FORCE_REGISTRATION
+            HideRegistration  = 0x00000020, // OAIF_HIDE_REGISTRATION
+            UrlProtocol       = 0x00000040, // OAIF_URL_PROTOCOL
+            FileIsUri         = 0x00000080, // OAIF_FILE_IS_URI
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, PreserveSig = true)]
+        private static extern int SHOpenWithDialog(IntPtr hwndParent, ref OpenAsInfo oainfo);
 
         private async void ScanButton_Click(object sender, RoutedEventArgs e)
         {
@@ -390,6 +461,7 @@ namespace EolInspector
             return new FileEolResult
             {
                 RelativePath = Path.GetRelativePath(root, path),
+                FullPath = path,
                 Eol = eol,
                 Bom = bom,
                 CrlfCount = crlf,
@@ -423,6 +495,7 @@ namespace EolInspector
     public class FileEolResult
     {
         public string RelativePath { get; set; } = "";
+        public string FullPath { get; set; } = "";
         public string Eol { get; set; } = "";
         public string Bom { get; set; } = "None";
         public int CrlfCount { get; set; }
@@ -430,9 +503,11 @@ namespace EolInspector
         public int CrCount { get; set; }
         public long SizeBytes { get; set; }
 
+        // Always shown in bytes with the current culture's thousands separator
+        // (e.g. "1.000.000 bytes" on a de-DE machine). The column sorts on the
+        // raw SizeBytes value via SortMemberPath in the XAML, so ordering stays
+        // numeric regardless of how this string is formatted.
         public string SizeDisplay =>
-            SizeBytes < 1024 ? $"{SizeBytes} B"
-            : SizeBytes < 1024 * 1024 ? $"{SizeBytes / 1024.0:0.#} KB"
-            : $"{SizeBytes / (1024.0 * 1024.0):0.#} MB";
+            SizeBytes == 1 ? "1 byte" : $"{SizeBytes:N0} bytes";
     }
 }

@@ -199,6 +199,20 @@
             </Style.Triggers>
         </Style>
 
+        <!-- Right-aligned cell (sizes read better flush right). -->
+        <Style x:Key="RightCellStyle" TargetType="TextBlock">
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="8,0"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+        </Style>
+
+        <!-- Right-aligned column header to match a right-aligned column. -->
+        <Style x:Key="RightHeaderStyle" TargetType="DataGridColumnHeader"
+               BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+            <Setter Property="HorizontalContentAlignment" Value="Right"/>
+        </Style>
+
         <!-- BOM cell: muted when absent ("None"), highlighted when present. -->
         <Style x:Key="BomCellStyle" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace"/>
@@ -330,6 +344,7 @@
                   SelectionMode="Extended"
                   EnableRowVirtualization="True"
                   VirtualizingPanel.VirtualizationMode="Recycling"
+                  MouseDoubleClick="ResultsGrid_MouseDoubleClick"
                   RowHeaderWidth="0">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="File" Binding="{Binding RelativePath}" Width="*"/>
@@ -343,7 +358,10 @@
                                     ElementStyle="{StaticResource CountCellStyle}"/>
                 <DataGridTextColumn Header="CR" Binding="{Binding CrCount}" Width="75"
                                     ElementStyle="{StaticResource CountCellStyle}"/>
-                <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="95"/>
+                <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="130"
+                                    SortMemberPath="SizeBytes"
+                                    ElementStyle="{StaticResource RightCellStyle}"
+                                    HeaderStyle="{StaticResource RightHeaderStyle}"/>
             </DataGrid.Columns>
         </DataGrid>
 
