@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
 
@@ -12,13 +11,15 @@ namespace EolInspector
         private const string DefaultExcludedFolders =
             "bin,obj,.git,.vs,node_modules,packages";
 
-        private readonly ObservableCollection<FileEolResult> _results = new();
         private string? _selectedFolder;
+
+        // Non-null only while a scan is running. Doubles as the "is scanning"
+        // flag and the handle the Cancel button uses.
+        private CancellationTokenSource? _cts;
 
         public MainWindow()
         {
             InitializeComponent();
-            ResultsGrid.ItemsSource = _results;
 
             ExtBox.Text = DefaultExtensions;
             ExcludeBox.Text = DefaultExcludedFolders;
@@ -73,63 +74,188 @@ namespace EolInspector
             }
         }
 
-        private void ScanButton_Click(object sender, RoutedEventArgs e)
+        private async void ScanButton_Click(object sender, RoutedEventArgs e)
         {
+            // While a scan is running this same button acts as Cancel.
+            if (_cts != null)
+            {
+                _cts.Cancel();
+                StatusText.Text = "Cancelling…";
+                return;
+            }
+
             if (string.IsNullOrEmpty(_selectedFolder) || !Directory.Exists(_selectedFolder))
             {
                 MessageBox.Show("Please pick a valid folder first.");
                 return;
             }
 
-            _results.Clear();
-            StatusText.Text = "Scanning…";
-
+            // Snapshot every input on the UI thread. The background task must
+            // not read any controls.
+            string root = _selectedFolder;
             var extensions = ParseExtensions(ExtBox.Text);
             bool recurse = RecurseCheck.IsChecked == true;
             var searchOption = recurse
                 ? SearchOption.AllDirectories
                 : SearchOption.TopDirectoryOnly;
-
-            // Folder exclusions only apply to recursive scans; an empty set
-            // means "exclude nothing".
             var excludedFolders = recurse
                 ? ParseExcludedFolders(ExcludeBox.Text)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            int scanned = 0, skipped = 0;
+            _cts = new CancellationTokenSource();
+            var token = _cts.Token;
 
+            // Progress<T> captures this (UI) thread's context, so the callback
+            // runs on the UI thread. The scan loop throttles how often it
+            // reports, so this fires tens of times, not thousands.
+            var progress = new Progress<ScanProgress>(p =>
+            {
+                if (p.Total > 0)
+                {
+                    ScanProgressBar.Maximum = p.Total;
+                    ScanProgressBar.Value = p.Done;
+                    StatusText.Text =
+                        $"Scanning… {p.Done}/{p.Total}  ({p.Shown} shown, {p.Skipped} skipped)";
+                }
+                else
+                {
+                    ScanProgressBar.Value = 0;
+                    StatusText.Text = "Enumerating files…";
+                }
+            });
+
+            SetScanningUi(true);
+            ResultsGrid.ItemsSource = null;   // detach old rows; reassigned once at the end
+
+            ScanOutcome outcome;
             try
             {
-                foreach (var path in EnumerateFilesSafe(_selectedFolder, searchOption, excludedFolders))
-                {
-                    if (extensions.Count > 0)
-                    {
-                        var ext = Path.GetExtension(path).ToLowerInvariant();
-                        if (!extensions.Contains(ext))
-                            continue;
-                    }
-
-                    try
-                    {
-                        var result = AnalyzeFile(path, _selectedFolder);
-                        if (result != null)
-                            _results.Add(result);
-                        else
-                            skipped++;
-                        scanned++;
-                    }
-                    catch
-                    {
-                        skipped++;
-                    }
-                }
-
-                StatusText.Text = $"Done. {_results.Count} file(s) shown, {scanned} scanned, {skipped} skipped (binary/unreadable).";
+                outcome = await Task.Run(
+                    () => RunScan(root, searchOption, extensions, excludedFolders, progress, token),
+                    token);
             }
             catch (Exception ex)
             {
                 StatusText.Text = "Error: " + ex.Message;
+                ScanProgressBar.Value = 0;
+                SetScanningUi(false);
+                _cts.Dispose();
+                _cts = null;
+                return;
             }
+
+            // Assign all rows in a single shot — the biggest win over adding
+            // them one at a time during the scan.
+            ResultsGrid.ItemsSource = outcome.Results;
+
+            StatusText.Text = outcome.Cancelled
+                ? $"Cancelled. {outcome.Results.Count} file(s) shown, {outcome.Scanned} scanned, {outcome.Skipped} skipped."
+                : $"Done. {outcome.Results.Count} file(s) shown, {outcome.Scanned} scanned, {outcome.Skipped} skipped (binary/unreadable).";
+
+            SetScanningUi(false);
+            _cts.Dispose();
+            _cts = null;
+        }
+
+        // Toggles the window between idle and scanning states. The Scan button
+        // stays enabled throughout because it becomes the Cancel button.
+        private void SetScanningUi(bool scanning)
+        {
+            ScanButton.Content = scanning ? "Cancel" : "Scan";
+            ScanProgressBar.Visibility = scanning ? Visibility.Visible : Visibility.Collapsed;
+
+            PickButton.IsEnabled = !scanning;
+            ResetExtButton.IsEnabled = !scanning;
+            ExtBox.IsEnabled = !scanning;
+            RecurseCheck.IsEnabled = !scanning;
+
+            // Exclusion controls additionally depend on the recurse checkbox.
+            bool excl = !scanning && RecurseCheck.IsChecked == true;
+            ExcludeBox.IsEnabled = excl;
+            ExcludeLabel.IsEnabled = excl;
+            ResetExcludeButton.IsEnabled = excl;
+        }
+
+        // Runs entirely on a background thread: walks the tree, analyzes each
+        // matching file, and reports throttled progress. Touches no UI.
+        private static ScanOutcome RunScan(
+            string root,
+            SearchOption option,
+            HashSet<string> extensions,
+            HashSet<string> excludedFolders,
+            IProgress<ScanProgress> progress,
+            CancellationToken token)
+        {
+            var outcome = new ScanOutcome();
+
+            // Phase 1 — enumerate matching paths up front so phase 2 has a known
+            // total and the progress bar can be determinate.
+            progress.Report(new ScanProgress(0, 0, 0, 0)); // Total 0 => "Enumerating…"
+
+            var paths = new List<string>();
+            foreach (var path in EnumerateFilesSafe(root, option, excludedFolders))
+            {
+                if (token.IsCancellationRequested)
+                {
+                    outcome.Cancelled = true;
+                    return outcome;
+                }
+
+                if (extensions.Count > 0)
+                {
+                    var ext = Path.GetExtension(path).ToLowerInvariant();
+                    if (!extensions.Contains(ext))
+                        continue;
+                }
+                paths.Add(path);
+            }
+
+            int total = paths.Count;
+
+            // Phase 2 — analyze. Report at most every ReportEvery files (plus the
+            // final one) to keep UI marshaling cheap.
+            const int ReportEvery = 64;
+            for (int i = 0; i < total; i++)
+            {
+                if (token.IsCancellationRequested)
+                {
+                    outcome.Cancelled = true;
+                    break;
+                }
+
+                try
+                {
+                    var result = AnalyzeFile(paths[i], root);
+                    if (result != null)
+                        outcome.Results.Add(result);
+                    else
+                        outcome.Skipped++;
+                    outcome.Scanned++;
+                }
+                catch
+                {
+                    outcome.Skipped++;
+                }
+
+                if (i % ReportEvery == 0 || i == total - 1)
+                    progress.Report(new ScanProgress(i + 1, total, outcome.Results.Count, outcome.Skipped));
+            }
+
+            return outcome;
+        }
+
+        // Immutable progress snapshot handed from the scan thread to the UI.
+        // Total == 0 signals the indeterminate "enumerating" phase.
+        private sealed record ScanProgress(int Done, int Total, int Shown, int Skipped);
+
+        // Everything a scan produces, returned once when it finishes (or is
+        // cancelled — partial results are kept).
+        private sealed class ScanOutcome
+        {
+            public List<FileEolResult> Results { get; } = new();
+            public int Scanned { get; set; }
+            public int Skipped { get; set; }
+            public bool Cancelled { get; set; }
         }
 
         private static HashSet<string> ParseExtensions(string raw)
@@ -206,6 +332,13 @@ namespace EolInspector
         {
             var bytes = File.ReadAllBytes(path);
 
+            // Detect a leading byte-order mark before the binary check. In
+            // practice only files with a UTF-8 BOM survive to be reported,
+            // because UTF-16/UTF-32 files contain NUL bytes and get skipped
+            // below — but we recognise all of them so the value is correct if
+            // the binary rule is ever relaxed.
+            string bom = DetectBom(bytes);
+
             // Up-front binary check: a NUL byte anywhere is a strong signal the
             // file is binary. Doing this first means a NUL that appears *after*
             // some line endings still causes the file to be skipped, rather than
@@ -258,11 +391,32 @@ namespace EolInspector
             {
                 RelativePath = Path.GetRelativePath(root, path),
                 Eol = eol,
+                Bom = bom,
                 CrlfCount = crlf,
                 LfCount = lf,
                 CrCount = cr,
                 SizeBytes = bytes.Length
             };
+        }
+
+        /// <summary>
+        /// Returns the byte-order mark at the very start of the file, or "None".
+        /// Longer marks are checked first because shorter ones are prefixes of
+        /// them (UTF-16 LE "FF FE" is the start of UTF-32 LE "FF FE 00 00").
+        /// </summary>
+        private static string DetectBom(byte[] b)
+        {
+            if (b.Length >= 4 && b[0] == 0x00 && b[1] == 0x00 && b[2] == 0xFE && b[3] == 0xFF)
+                return "UTF-32 BE";
+            if (b.Length >= 4 && b[0] == 0xFF && b[1] == 0xFE && b[2] == 0x00 && b[3] == 0x00)
+                return "UTF-32 LE";
+            if (b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF)
+                return "UTF-8";
+            if (b.Length >= 2 && b[0] == 0xFE && b[1] == 0xFF)
+                return "UTF-16 BE";
+            if (b.Length >= 2 && b[0] == 0xFF && b[1] == 0xFE)
+                return "UTF-16 LE";
+            return "None";
         }
     }
 
@@ -270,6 +424,7 @@ namespace EolInspector
     {
         public string RelativePath { get; set; } = "";
         public string Eol { get; set; } = "";
+        public string Bom { get; set; } = "None";
         public int CrlfCount { get; set; }
         public int LfCount { get; set; }
         public int CrCount { get; set; }

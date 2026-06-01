@@ -31,6 +31,9 @@
         <SolidColorBrush x:Key="EolLf"    Color="#FF89D185"/>
         <SolidColorBrush x:Key="EolCr"    Color="#FFD7A0FF"/>
 
+        <!-- BOM highlight (any BOM present) -->
+        <SolidColorBrush x:Key="BomPresent" Color="#FF4EC9B0"/>
+
         <!-- ===== TextBox ===== -->
         <Style TargetType="TextBox">
             <Setter Property="Background" Value="{StaticResource ControlBg}"/>
@@ -195,6 +198,43 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
+
+        <!-- BOM cell: muted when absent ("None"), highlighted when present. -->
+        <Style x:Key="BomCellStyle" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="8,0"/>
+            <Setter Property="Foreground" Value="{StaticResource BomPresent}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Bom}" Value="None">
+                    <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- ===== ProgressBar (slim scan indicator) ===== -->
+        <Style TargetType="ProgressBar">
+            <Setter Property="Height" Value="4"/>
+            <Setter Property="Foreground" Value="{StaticResource ControlBgActive}"/>
+            <Setter Property="Background" Value="{StaticResource ControlBg}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="2" ClipToBounds="True">
+                            <Grid>
+                                <Border x:Name="PART_Track"/>
+                                <Border x:Name="PART_Indicator"
+                                        HorizontalAlignment="Left"
+                                        Background="{TemplateBinding Foreground}"
+                                        CornerRadius="2"/>
+                            </Grid>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <DockPanel Margin="12">
@@ -272,6 +312,14 @@
                        Padding="8,4"/>
         </Border>
 
+        <!-- Scan progress bar: sits just above the status bar, shown only
+             while a scan is running. -->
+        <ProgressBar x:Name="ScanProgressBar"
+                     DockPanel.Dock="Bottom"
+                     Minimum="0" Value="0"
+                     Visibility="Collapsed"
+                     Margin="0,8,0,0"/>
+
         <!-- Results grid -->
         <DataGrid x:Name="ResultsGrid"
                   AutoGenerateColumns="False"
@@ -280,9 +328,13 @@
                   GridLinesVisibility="Horizontal"
                   HeadersVisibility="Column"
                   SelectionMode="Extended"
+                  EnableRowVirtualization="True"
+                  VirtualizingPanel.VirtualizationMode="Recycling"
                   RowHeaderWidth="0">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="File" Binding="{Binding RelativePath}" Width="*"/>
+                <DataGridTextColumn Header="BOM" Binding="{Binding Bom}" Width="100"
+                                    ElementStyle="{StaticResource BomCellStyle}"/>
                 <DataGridTextColumn Header="EOL Style" Binding="{Binding Eol}" Width="120"
                                     ElementStyle="{StaticResource EolCellStyle}"/>
                 <DataGridTextColumn Header="CRLF" Binding="{Binding CrlfCount}" Width="75"
