@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>EolInspector</RootNamespace>
+    <AssemblyName>EolInspector</AssemblyName>
+    <Product>EOL Inspector</Product>
+    <!-- Major and minor stay put; only the build number goes up, with every delivery. -->
+    <Version>1.0.7</Version>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- Publish: one self-contained exe, native libraries bundled inside it.
+       A plain `dotnet publish` picks all of this up, no extra switches needed. -->
+  <PropertyGroup>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Reproducible builds: no debug information. The PDB path would carry the
+         random build folder into the exe, so identical sources would give different bytes. -->
+    <DebugType>none</DebugType>
+    <!-- No commit hash appended to the product version: a build from a git clone matches one from a zip. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <!-- Icon set (replace these files with the real artwork; names must stay the same).
+       app.ico     -> exe icon (ApplicationIcon above) and window icon
+       app_256.png -> header block image -->
+  <ItemGroup>
+    <Resource Include="app.ico" />
+    <Resource Include="app_256.png" />
+  </ItemGroup>
+
+  <!-- The SDK that built the exe, shown in the header next to the version. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="SdkVersion" Value="$(NETCoreSdkVersion)" />
+  </ItemGroup>
+
+  <!-- Reproducibility guard: the build folder must never influence the output.
+       The compiler names every `file`-scoped type <Name>F<SHA-256 of the source file's full path>__Type,
+       so any such type - a `file class` in our code, or one emitted by a source generator such as
+       [GeneratedRegex] - puts the build location into the assembly, and two builds of the same
+       source from different folders differ. PathMap does not reliably reach these names.
+       After each compile this scans the assembly for that fingerprint and fails the build, naming
+       the type. Nothing to configure; copy the target as-is into any other project. -->
+  <Target Name="RejectPathHashedTypeNames" AfterTargets="CoreCompile">
+    <PropertyGroup>
+      <_RphAssembly>@(IntermediateAssembly->'%(FullPath)')</_RphAssembly>
+      <_RphMatch Condition="Exists('$(_RphAssembly)')">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(_RphAssembly)')), 'F[0-9A-F]{64}__\w+').Value)</_RphMatch>
+    </PropertyGroup>
+    <Error Condition="'$(_RphMatch)' != ''"
+           Text="Path-dependent type name in $(_RphAssembly): '$(_RphMatch)'. A `file`-scoped type (hand-written, or from a source generator such as [GeneratedRegex]) is named after the full path of its source file, so the build folder changes the output. Replace it; see the comment on RejectPathHashedTypeNames in the project file." />
+  </Target>
+
+</Project>
